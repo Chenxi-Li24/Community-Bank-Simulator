@@ -375,6 +375,151 @@ static int create_account_prompt(Account accounts[], int *account_count) {
     return idx;
 }
 
+/* Transfer amount from one account to another, verified by source PIN.
+   Enforces same daily rules as withdraw for the source account:
+     - max 3 withdrawals/transfers per day
+     - max amount per single transfer: 500
+   Return codes:
+     0 = success
+    -1 = source account not found
+    -7 = destination account not found
+    -2 = invalid amount (<= 0)
+    -3 = insufficient funds
+    -4 = incorrect PIN
+    -5 = daily withdrawal limit reached (3)
+    -6 = amount exceeds per-transfer limit (500)
+*/
+static int transfer_account(Account accounts[], int count,
+                            const char *from_id, const char *pin,
+                            const char *to_id, double amount)
+{
+    if (amount <= 0.0) return -2;
+    if (amount > 500.0) return -6; /* per-transfer cap */
+
+    int idx_from = find_account_by_id(accounts, count, from_id);
+    if (idx_from < 0) return -1;
+
+    int idx_to = find_account_by_id(accounts, count, to_id);
+    if (idx_to < 0) return -7;
+
+    if (!pin || strcmp(accounts[idx_from].Pin, pin) != 0) return -4;
+    if (accounts[idx_from].withdrawals_today >= 3) return -5;
+    if (accounts[idx_from].balance < amount) return -3;
+
+    accounts[idx_from].balance -= amount;
+    accounts[idx_to].balance += amount;
+    accounts[idx_from].withdrawals_today += 1;
+    return 0;
+}
+
+
+// change PIN for logged-in account (verify old PIN, require confirmation) 
+static void change_pin_prompt(Account accounts[], int idx) {
+    if (idx < 0) return;
+    char old_pin[16];
+    char new_pin[16];
+    char new_pin_conf[16];
+
+    printf("\n--- Change PIN ---\n");
+    printf("Enter current 6-digit PIN: ");
+    if (!fgets(old_pin, sizeof(old_pin), stdin)) { printf("Input error.\n"); return; }
+    trim_newline(old_pin);
+
+    if (strlen(old_pin) != 6 || strcmp(accounts[idx].Pin, old_pin) != 0) {
+        printf("Incorrect current PIN. Aborting.\n");
+        return;
+    }
+
+    while (true) {
+        printf("Enter new 6-digit PIN: ");
+        if (!fgets(new_pin, sizeof(new_pin), stdin)) { printf("Input error.\n"); return; }
+        trim_newline(new_pin);
+
+        /* validate digits and length */
+        size_t pinlen = strlen(new_pin);
+        bool ok = (pinlen == 6);
+        for (size_t i = 0; ok && i < pinlen; ++i) {
+            if (!isdigit((unsigned char)new_pin[i])) ok = false;
+        }
+        if (!ok) {
+            printf("Invalid PIN. It must be exactly 6 digits.\n");
+            continue;
+        }
+
+        printf("Confirm new PIN: ");
+        if (!fgets(new_pin_conf, sizeof(new_pin_conf), stdin)) { printf("Input error.\n"); return; }
+        trim_newline(new_pin_conf);
+
+        if (strcmp(new_pin, new_pin_conf) != 0) {
+            printf("PINs do not match. Try again.\n");
+            continue;
+        }
+
+        /* success: store new PIN */
+        strncpy(accounts[idx].Pin, new_pin, sizeof(accounts[idx].Pin) - 1);
+        accounts[idx].Pin[6] = '\0';
+        printf("PIN changed successfully.\n");
+        break;
+    }
+}
+// change PIN for logged-in account (verify username and password) 
+static void manage_pin_prompt(Account accounts[], int idx) {
+    if (idx < 0) return;
+    char username[32];
+    char password[32];
+    char old_pin[16];
+    char new_pin[16];
+    char new_pin_conf[16];
+
+    printf("\n--- Manage PIN ---\n");
+    /*
+    printf("\nEnter password: ");
+    if (!fgets(password, sizeof(password), stdin)) { printf("Input error.\n"); return; }
+    trim_newline(password);
+
+    if (strcmp(accounts[idx].password, password) != 0) {
+        printf("Incorrect password. Aborting.\n");
+        return;
+    }
+
+    printf("Enter current 6-digit PIN: ");
+    if (!fgets(old_pin, sizeof(old_pin), stdin)) { printf("Input error.\n"); return; }
+    trim_newline(old_pin);
+*/
+    while (true) {
+        printf("Enter new 6-digit PIN: ");
+        if (!fgets(new_pin, sizeof(new_pin), stdin)) { printf("Input error.\n"); return; }
+        trim_newline(new_pin);
+
+        /* validate digits and length */
+        size_t pinlen = strlen(new_pin);
+        bool ok = (pinlen == 6);
+        for (size_t i = 0; ok && i < pinlen; ++i) {
+            if (!isdigit((unsigned char)new_pin[i])) ok = false;
+        }
+        if (!ok) {
+            printf("Invalid PIN. It must be exactly 6 digits.\n");
+            continue;
+        }
+
+        printf("Confirm new PIN: ");
+        if (!fgets(new_pin_conf, sizeof(new_pin_conf), stdin)) { printf("Input error.\n"); return; }
+        trim_newline(new_pin_conf);
+
+        if (strcmp(new_pin, new_pin_conf) != 0) {
+            printf("PINs do not match. Try again.\n");
+            continue;
+        }
+
+        /* success: store new PIN */
+        strncpy(accounts[idx].Pin, new_pin, sizeof(accounts[idx].Pin) - 1);
+        accounts[idx].Pin[6] = '\0';
+        printf("PIN managed successfully.\n");
+        break;
+    }
+}
+
+
 int main() {
     Account accounts[MAX_ACCOUNTS];
     for (int i = 0; i < MAX_ACCOUNTS; ++i) {
@@ -393,7 +538,8 @@ int main() {
         printf("1) Create account\n");
         printf("2) Login\n");
         printf("3) Simulate new day (reset withdrawals counters)\n");
-        printf("4) Exit\n");
+        printf("4) Manage PIN\n");
+        printf("5) Exit\n");
         printf("Choose an option: ");
 
         char choice_buf[16];
@@ -420,18 +566,56 @@ int main() {
                 printf("\n----- Account Menu -----\n");
                 printf("Username: %s\n", accounts[logged].username);
                 printf("Account ID: %s\n", accounts[logged].account_id);
-                printf("\n1) Withdraw\n");
-                printf("2) Deposit\n");
-                printf("3) Check balance\n");
-                printf("4) Logout\n");
-                printf("5) Exit program\n");
+                printf("\n1) Transfer\n");
+                printf("2) Withdraw\n");
+                printf("3) Deposit\n");
+                printf("4) Check balance\n");
+                printf("5) Change PINLogout\n");
+                printf("6) Exit program\n");
+                printf("7) Change PIN\n");   /* added option */
                 printf("Choose an option: ");
                 if (!fgets(choice_buf, sizeof(choice_buf), stdin)) { printf("Input error.\n"); break; }
                 trim_newline(choice_buf);
                 int sub = atoi(choice_buf);
 
                 if (sub == 1) {
-                   
+                    /* Transfer from logged-in account to another (PIN required) */
+                    char pin_buf[16], to_accid[16], amt_buf[64];
+                    printf("Enter your 6-digit PIN: ");
+                    if (!fgets(pin_buf, sizeof(pin_buf), stdin)) { printf("Input error.\n"); continue; }
+                    trim_newline(pin_buf);
+                    if (strlen(pin_buf) != 6 || strcmp(accounts[logged].Pin, pin_buf) != 0) {
+                        printf("Incorrect PIN. Transfer cancelled.\n"); continue;
+                    }
+
+                    printf("Enter destination 7-digit Account ID: ");
+                    if (!fgets(to_accid, sizeof(to_accid), stdin)) { printf("Input error.\n"); continue; }
+                    trim_newline(to_accid);
+                    if (!is_valid_account_id(to_accid)) { printf("Invalid destination account ID format.\n"); continue; }
+                    if (find_account_by_id(accounts, account_count, to_accid) < 0) { printf("Destination account not found.\n"); continue; }
+                    if (strcmp(to_accid, accounts[logged].account_id) == 0) { printf("Cannot transfer to the same account.\n"); continue; }
+
+                    printf("Enter transfer amount (> 0, max 500): ");
+                    if (!fgets(amt_buf, sizeof(amt_buf), stdin)) { printf("Input error.\n"); continue; }
+                    trim_newline(amt_buf);
+                    char *endptr; double amt = strtod(amt_buf, &endptr);
+                    if (endptr == amt_buf || amt <= 0.0) { printf("Invalid amount.\n"); continue; }
+
+                    int tr = transfer_account(accounts, account_count, accounts[logged].account_id, pin_buf, to_accid, amt);
+                    if (tr == 0) {
+                        printf("Transfer successful. New balance: %.2f\n", accounts[logged].balance);
+                    } else if (tr == -3) {
+                        printf("Transfer failed: insufficient funds. Balance: %.2f\n", accounts[logged].balance);
+                    } else if (tr == -5) {
+                        printf("Transfer failed: daily transfer/withdrawal limit reached (3).\n");
+                    } else if (tr == -6) {
+                        printf("Transfer failed: amount exceeds per-transfer limit (500).\n");
+                    } else {
+                        printf("Transfer failed (code %d).\n", tr);
+                    }
+
+                } else if (sub == 2) {
+                    /* withdraw (PIN required) */
                     char pin_buf[16], amt_buf[64];
                     printf("Enter your 6-digit PIN: ");
                     if (!fgets(pin_buf, sizeof(pin_buf), stdin)) { printf("Input error.\n"); continue; }
@@ -450,8 +634,9 @@ int main() {
                     else if (r == -5) printf("Daily withdrawal limit reached (3). Try next day.\n");
                     else if (r == -6) printf("Amount exceeds per-withdrawal limit (500).\n");
                     else printf("Withdrawal failed (code %d).\n", r);
-                } else if (sub == 2) {
-                   
+
+                } else if (sub == 3) {
+                    /* deposit (PIN required) */
                     char pin_buf[16], amt_buf[64];
                     printf("Enter your 6-digit PIN: ");
                     if (!fgets(pin_buf, sizeof(pin_buf), stdin)) { printf("Input error.\n"); continue; }
@@ -467,13 +652,16 @@ int main() {
                     int r = deposit(accounts, account_count, accounts[logged].account_id, amt);
                     if (r == 0) printf("Deposit successful. New balance: %.2f\n", accounts[logged].balance);
                     else printf("Deposit failed (code %d).\n", r);
-                } else if (sub == 3) {
+
+                } else if (sub == 4) {
                     printf("Current balance: %.2f\n", accounts[logged].balance);
                     printf("Withdrawals today: %d/3\n", accounts[logged].withdrawals_today);
-                } else if (sub == 4) {
+                } else if (sub == 5) {
+                    change_pin_prompt(accounts, logged); 
+                } else if (sub == 6) {
                     printf("Logging out...\n");
                     break;
-                } else if (sub == 5) {
+                } else if (sub == 7) {
                     printf("Goodbye.\n");
                     return 0;
                 } else {
@@ -485,6 +673,22 @@ int main() {
             for (int i = 0; i < account_count; ++i) accounts[i].withdrawals_today = 0;
             printf("New day simulated: withdrawal counters reset for all accounts.\n");
         } else if (choice == 4) {
+            if (account_count == 0) {
+                printf("No accounts available to manage PIN.\n");
+            } else {
+                for (int i = 0; i < account_count; ++i) {
+                    printf("Account %d: %d --- %s\n", i + 1, accounts[i].account_id, accounts[i].username);
+                }
+                printf("Select an account to manage PIN: ");
+                int acc_choice;
+                if (scanf("%d", &acc_choice) != 1 || acc_choice < 1 || acc_choice > account_count) {
+                    printf("Invalid account selection.\n");
+                    trim_newline(choice_buf);
+                    continue;
+                }
+                manage_pin_prompt(accounts, acc_choice - 1);
+            }
+        } else if (choice == 5) {
             printf("Goodbye.\n");
             break;
         } else {
